@@ -1,115 +1,166 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import date
-from supabase import create_client, Client
+import plotly.graph_objects as go
+from datetime import datetime, timedelta, date
+from database import TaskDatabase
+from productivity_analyzer import ProductivityAnalyzer
+from llm_processor import TaskProcessor
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Productivity Dash", page_icon="✅", layout="wide")
+st.set_page_config(page_title="Dashboard de Tarefas", layout="wide", page_icon="📊")
 
-# --- CONEXÃO COM SUPABASE ---
-@st.cache_resource
-def init_connection():
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+db = TaskDatabase()
+analyzer = ProductivityAnalyzer()
+processor = TaskProcessor()
 
-supabase = init_connection()
+# Input do User ID
+st.sidebar.title("⚙️ Configurações")
+USER_ID = st.sidebar.number_input("Seu Telegram User ID", min_value=1, value=123456789, help="Digite seu ID do Telegram")
 
-# --- FUNÇÕES DE DADOS ---
-def fetch_tasks(selected_date):
-    """Busca tarefas filtradas pela data alvo."""
-    response = supabase.table("tarefas") \
-        .select("*") \
-        .eq("data_alvo", str(selected_date)) \
-        .order("id") \
-        .execute()
-    return response.data
+st.title("📊 Dashboard de Produtividade Inteligente")
 
-def update_task_status(task_id, new_status):
-    """Atualiza o status da tarefa no banco de dados."""
-    supabase.table("tarefas") \
-        .update({"status": new_status}) \
-        .eq("id", task_id) \
-        .execute()
-    # Limpa o cache para forçar recarregamento se necessário (neste app usamos state)
-
-# --- SIDEBAR / FILTROS ---
-st.sidebar.title("Configurações")
-filtro_data = st.sidebar.date_input("Filtrar por Data", date.today())
-
-# --- BUSCA DE DADOS ---
-data = fetch_tasks(filtro_data)
-df = pd.DataFrame(data)
-
-# --- CABEÇALHO ---
-st.title(f"📊 Dashboard de Produtividade")
-st.subheader(f"Tarefas de {filtro_data.strftime('%d/%m/%Y')}")
-
-if not df.empty:
-    # --- MÉTRICAS ---
-    total_tarefas = len(df)
-    concluidas = len(df[df['status'] == 'Concluido'])
-    pendentes = total_tarefas - concluidas
-    progresso = (concluidas / total_tarefas)
+# Sidebar com análises
+with st.sidebar:
+    st.header("🧠 Insights Inteligentes")
     
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total de Tarefas", total_tarefas)
-    col2.metric("Concluídas", concluidas, f"{int(progresso*100)}%")
-    col3.metric("Pendentes", pendentes)
-
-    st.divider()
-
-    # --- LISTA DE TAREFAS E GRÁFICO ---
-    col_lista, col_grafico = st.columns([1, 1])
-
-    with col_lista:
-        st.write("### 📝 Minhas Tarefas")
+    if st.button("🔄 Atualizar Análise", type="primary"):
+        with st.spinner("Analisando seu comportamento..."):
+            try:
+                analyzer.run_full_analysis(USER_ID)
+                st.success("✅ Análise atualizada!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro na análise: {e}")
+    
+    analytics = db.get_latest_analytics(USER_ID)
+    
+    if analytics:
+        st.subheader("⏰ Seus Melhores Horários")
+        st.metric("Hora Mais Produtiva", f"{analytics['best_completion_hour']}:00h")
+        st.metric("Hora Menos Produtiva", f"{analytics['worst_completion_hour']}:00h")
         
-        # Iterar pelas tarefas para criar checkboxes
-        for index, row in df.iterrows():
-            # Criar uma chave única para cada checkbox baseada no ID e Status
-            is_done = row['status'] == 'Concluido'
+        st.subheader("📅 Melhores Dias")
+        days = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom']
+        st.metric("Melhor Dia", days[analytics['best_day_of_week']])
+        st.metric("Pior Dia", days[analytics['worst_day_of_week']])
+        
+        st.subheader("📈 Performance")
+        st.metric("Score de Produtividade", f"{analytics['productivity_score']:.1f}/100")
+        
+        st.subheader("⏰ Notificação Ajustada")
+        settings = db.get_user_notification_settings(USER_ID)
+        if settings:
+            st.info(f"🔔 Lembrete: {settings['reminder_notification_time']}")
+        
+        st.subheader("💡 Sugestões Personalizadas")
+        if st.button("Gerar Sugestões com IA"):
+            with st.spinner("Gemini analisando..."):
+                try:
+                    suggestions = processor.suggest_task_optimization(analytics)
+                    st.markdown(suggestions)
+                except Exception as e:
+                    st.error(f"Erro: {e}")
+    else:
+        st.info("👆 Clique em 'Atualizar Análise' para começar")
+
+# Filtros de data
+col1, col2 = st.columns(2)
+with col1:
+    start_date = st.date_input("Data inicial", date.today() - timedelta(days=30))
+with col2:
+    end_date = st.date_input("Data final", date.today())
+
+# Buscar dados
+try:
+    tasks = db.get_tasks_for_dashboard(USER_ID, start_date, end_date)
+    df = pd.DataFrame(tasks)
+
+    if not df.empty:
+        df['task_date'] = pd.to_datetime(df['task_date'])
+        df['completed_at'] = pd.to_datetime(df['completed_at'])
+        
+        # Métricas principais
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            total_tasks = len(df)
+            st.metric("Total de Tarefas", total_tasks)
+        
+        with col2:
+            completed = len(df[df['status'] == 'completed'])
+            st.metric("Concluídas", completed, delta=f"{completed}/{total_tasks}")
+        
+        with col3:
+            pending = len(df[df['status'] == 'pending'])
+            st.metric("Pendentes", pending)
+        
+        with col4:
+            if total_tasks > 0:
+                completion_rate = (completed / total_tasks) * 100
+                st.metric("Taxa de Conclusão", f"{completion_rate:.1f}%")
+        
+        # Gráfico de tarefas por status
+        st.subheader("📈 Distribuição de Tarefas")
+        status_counts = df['status'].value_counts()
+        fig_status = px.pie(values=status_counts.values, names=status_counts.index, 
+                            title="Status das Tarefas",
+                            color_discrete_map={'completed': '#00d26a', 'pending': '#ffa600', 'cancelled': '#ff4444'})
+        st.plotly_chart(fig_status, use_container_width=True)
+        
+        # Análise de produtividade por hora do dia
+        st.subheader("⏰ Produtividade por Hora do Dia")
+        completed_df = df[df['status'] == 'completed'].copy()
+        if not completed_df.empty:
+            completed_df['hour'] = completed_df['completed_at'].dt.hour
+            hourly_completion = completed_df.groupby('hour').size().reset_index(name='count')
             
-            # Layout de linha para a tarefa
-            t_col1, t_col2 = st.columns([0.1, 0.9])
-            
-            # Checkbox para atualizar status
-            with t_col1:
-                check = st.checkbox("", value=is_done, key=f"task_{row['id']}")
-                
-                # Lógica de atualização imediata
-                new_status = "Concluido" if check else "Pendente"
-                if new_status != row['status']:
-                    update_task_status(row['id'], new_status)
-                    st.rerun() # Recarrega para atualizar métricas e interface
+            fig_hourly = px.bar(hourly_completion, x='hour', y='count',
+                               title="Tarefas Concluídas por Hora",
+                               labels={'hour': 'Hora do Dia', 'count': 'Tarefas Concluídas'},
+                               color_discrete_sequence=['#00d26a'])
+            fig_hourly.update_xaxis(tickmode='linear', tick0=0, dtick=1)
+            st.plotly_chart(fig_hourly, use_container_width=True)
+        
+        # Análise por dia da semana
+        st.subheader("📅 Produtividade por Dia da Semana")
+        df['day_of_week'] = df['task_date'].dt.dayofweek
+        df['day_name'] = df['task_date'].dt.day_name()
+        
+        daily_stats = df.groupby(['day_name', 'status']).size().reset_index(name='count')
+        fig_weekly = px.bar(daily_stats, x='day_name', y='count', color='status',
+                           title="Tarefas por Dia da Semana",
+                           color_discrete_map={'completed': '#00d26a', 'pending': '#ffa600', 'cancelled': '#ff4444'})
+        st.plotly_chart(fig_weekly, use_container_width=True)
+        
+        # Gráfico de tarefas ao longo do tempo
+        st.subheader("📅 Evolução Temporal")
+        daily_tasks = df.groupby(['task_date', 'status']).size().reset_index(name='count')
+        fig_timeline = px.line(daily_tasks, x='task_date', y='count', color='status',
+                              title="Tarefas ao Longo do Tempo",
+                              color_discrete_map={'completed': '#00d26a', 'pending': '#ffa600', 'cancelled': '#ff4444'})
+        st.plotly_chart(fig_timeline, use_container_width=True)
+        
+        # Análise de motivos de cancelamento
+        st.subheader("❌ Principais Motivos de Cancelamento")
+        cancelled_df = df[df['status'] == 'cancelled']
+        if not cancelled_df.empty and 'cancellation_reason' in cancelled_df.columns:
+            reasons = cancelled_df['cancellation_reason'].value_counts().head(5)
+            if not reasons.empty:
+                fig_reasons = px.bar(x=reasons.values, y=reasons.index, orientation='h',
+                                    title="Top 5 Motivos de Cancelamento",
+                                    labels={'x': 'Quantidade', 'y': 'Motivo'},
+                                    color_discrete_sequence=['#ff4444'])
+                st.plotly_chart(fig_reasons, use_container_width=True)
+        
+        # Tabela de tarefas recentes
+        st.subheader("📋 Tarefas Recentes")
+        display_df = df[['task_date', 'task_description', 'status', 'cancellation_reason']].sort_values('task_date', ascending=False).head(20)
+        st.dataframe(display_df, use_container_width=True)
+        
+    else:
+        st.info("📝 Nenhuma tarefa encontrada no período selecionado.")
+        st.write("Comece adicionando tarefas através do bot no Telegram!")
 
-            with t_col2:
-                # Se concluído, risca o texto
-                texto = f"~~{row['titulo']}~~" if is_done else row['titulo']
-                st.markdown(f"{texto} `({row['categoria']})`")
-
-    with col_grafico:
-        st.write("### 📊 Tarefas por Categoria")
-        # Agrupar dados para o gráfico
-        df_counts = df.groupby('categoria').size().reset_index(name='quantidade')
-        fig = px.bar(
-            df_counts, 
-            x='categoria', 
-            y='quantidade',
-            color='categoria',
-            labels={'quantidade': 'Nº de Tarefas', 'categoria': 'Categoria'},
-            template="plotly_white"
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-else:
-    st.info("Nenhuma tarefa encontrada para esta data. Que tal descansar? ☕")
-
-# --- CSS CUSTOMIZADO (OPCIONAL) ---
-st.markdown("""
-    <style>
-    .stCheckbox { margin-bottom: 0.5rem; }
-    [data-testid="stMetricValue"] { font-size: 28px; }
-    </style>
-    """, unsafe_allow_html=True)
+except Exception as e:
+    st.error(f"❌ Erro ao carregar dados: {e}")
+    st.info("Verifique se as credenciais do Supabase estão corretas nos Secrets.")
